@@ -1,120 +1,212 @@
-# DiGress: Discrete Denoising diffusion models for graph generation
+# GenAI for Molecular Discovery
+### Conditional Olfactory Molecule Generation via Discrete Graph Diffusion
 
-Update (Nov 20th, 2023): Working with large graphs (more than 100-200 nodes)? Consider using SparseDiff, a sparse version of DiGress: https://github.com/qym7/SparseDiff
+> M2 Intelligence Artificielle & Robotique — CY Cergy Paris Université  
+> Author: **Khalil Hamdaoui** | Supervisor: **Guillaume Renton** (ETIS Lab — UMR 8051)  
+> March 2026
 
-Update (July 11th, 2023): the code now supports multi-gpu. Please update all libraries according to the instructions. 
-All datasets should now download automatically
+---
 
-  - For the conditional generation experiments, check the `guidance` branch.
-  - If you are training new models from scratch, we recommand to use the `fixed_bug` branch in which some neural
-network layers have been fixed. The `fixed_bug` branch has not been evaluated, but should normally perform better.
-If you train the `fixed_bug` branch on datasets provided in this code, we would be happy to know the results.
+## Overview
 
-## Environment installation
-This code was tested with PyTorch 2.0.1, cuda 11.8 and torch_geometrics 2.3.1
+This project adapts **DiGress** — a discrete graph diffusion model — to the conditional generation of molecules with target olfactory profiles. Given a fragrance category (e.g. *floral*, *animal\_musk*, *woody*, *citrus*), the model generates novel molecular structures that are chemically valid and structurally close to the target class.
 
-  - Download anaconda/miniconda if needed
-  - Create a rdkit environment that directly contains rdkit:
-    
-    ```conda create -c conda-forge -n digress rdkit=2023.03.2 python=3.9```
-  - `conda activate digress`
-  - Check that this line does not return an error:
-    
-    ``` python3 -c 'from rdkit import Chem' ```
-  - Install graph-tool (https://graph-tool.skewed.de/): 
-    
-    ```conda install -c conda-forge graph-tool=2.45```
-  - Check that this line does not return an error:
-    
-    ```python3 -c 'import graph_tool as gt' ```
-  - Install the nvcc drivers for your cuda version. For example:
-    
-    ```conda install -c "nvidia/label/cuda-11.8.0" cuda```
-  - Install a corresponding version of pytorch, for example: 
-    
-    ```pip3 install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu118```
-  - Install other packages using the requirement file: 
-    
-    ```pip install -r requirements.txt```
+Rather than engineering molecules by hand or screening existing compounds one by one, we use **inverse design**: a generative model learns the underlying chemical distribution and directly proposes candidate structures satisfying the desired properties.
 
-  - Run:
-    
-    ```pip install -e .```
+---
 
-  - Navigate to the ./src/analysis/orca directory and compile orca.cpp: 
-    
-     ```g++ -O2 -std=c++11 -o orca orca.cpp```
+## Key Results
 
-Note: graph_tool and torch_geometric currently seem to conflict on MacOS, I have not solved this issue yet.
+| Category | Validity | Uniqueness | Novelty | Tanimoto |
+|---|---|---|---|---|
+| animal\_musk | 39.0% | 85.9% | 95.0% | 0.431 ± 0.238 |
+| floral | 21.8% | 81.2% | 88.6% | 0.355 ± 0.142 |
+| woody | 27.7% | 77.0% | 92.7% | 0.379 ± 0.171 |
+| citrus | 24.6% | 78.8% | 90.0% | 0.311 ± 0.135 |
 
-## Run the code
-  
-  - All code is currently launched through `python3 main.py`. Check hydra documentation (https://hydra.cc/) for overriding default parameters.
-  - To run the debugging code: `python3 main.py +experiment=debug.yaml`. We advise to try to run the debug mode first
-    before launching full experiments.
-  - To run a code on only a few batches: `python3 main.py general.name=test`.
-  - To run the continuous model: `python3 main.py model=continuous`
-  - To run the discrete model: `python3 main.py`
-  - You can specify the dataset with `python3 main.py dataset=guacamol`. Look at `configs/dataset` for the list
-of datasets that are currently available
-    
-## Checkpoints
+- **Novelty > 88%** across all categories — the model genuinely invents new structures
+- **Tanimoto > baseline** — one-hot conditioning steers generation toward the correct chemical family
+- No architectural modification to DiGress required
 
-**My drive account has unfortunately been deleted, and I have lost access to the checkpoints. If you happen to have a downloaded checkpoint stored locally, I would be glad if you could send me an email at vignac.clement@gmail.com or raise a Github issue.**
+---
 
-The following checkpoints should work with the latest commit:
-
-  - [QM9 (heavy atoms only)](https://drive.switch.ch/index.php/s/8IhyGE4giIW1wV3) \\
-  
-  - [Planar](https://drive.switch.ch/index.php/s/8IhyGE4giIW1wV3) \\
-
-  - MOSES (the model in the paper was trained a bit longer than this one): https://drive.google.com/file/d/1LUVzdZQRwyZWWHJFKLsovG9jqkehcHYq/view?usp=sharing -- This checkpoint has been sent to me, but I have not tested it. \\
-
-  - SBM: ~~https://drive.switch.ch/index.php/s/rxWFVQX4Cu4Vq5j~~ \\
-    Performance of this checkpoint:
-    - Test NLL: 4757.903
-    - `{'spectre': 0.0060240439382095445, 'clustering': 0.05020166160905111, 'orbit': 0.04615866844490847, 'sbm_acc': 0.675, 'sampling/frac_unique': 1.0, 'sampling/frac_unique_non_iso': 1.0, 'sampling/frac_unic_non_iso_valid': 0.625, 'sampling/frac_non_iso': 1.0}`
-
-  - Guacamol: https://drive.google.com/file/d/1KHNCnPJmPjIlmhnJh1RAvhmVBssKPqF4/view?usp=sharing -- This checkpoint has been sent to me, but I have not tested it.
-
-## Generated samples
-
-We provide the generated samples for some of the models. If you have retrained a model from scratch for which the samples are
-not available yet, we would be very happy if you could send them to us!
-
-
-## Troubleshooting 
-
-`PermissionError: [Errno 13] Permission denied: '/home/vignac/DiGress/src/analysis/orca/orca'`: You probably did not compile orca.
-    
-
-## Use DiGress on a new dataset
-
-To implement a new dataset, you will need to create a new file in the `src/datasets` folder. Depending on whether you are considering
-molecules or abstract graphs, you can base this file on `moses_dataset.py` or `spectre_datasets.py`, for example. 
-This file should implement a `Dataset` class to process the data (check [PyG documentation](https://pytorch-geometric.readthedocs.io/en/latest/tutorial/create_dataset.html)), 
-as well as a `DatasetInfos` class that is used to define the noise model and some metrics.
-
-For molecular datasets, you'll need to specify several things in the DatasetInfos:
-  - The atom_encoder, which defines the one-hot encoding of the atom types in your dataset
-  - The atom_decoder, which is simply the inverse mapping of the atom encoder
-  - The atomic weight for each atom atype
-  - The most common valency for each atom type
-
-The node counts and the distribution of node types and edge types can be computed automatically using functions from `AbstractDataModule`.
-
-Once the dataset file is written, the code in main.py can be adapted to handle the new dataset, and a new file can be added in `configs/dataset`.
-
-
-## Cite the paper
-
+## Project Structure
 ```
-@inproceedings{
-vignac2023digress,
-title={DiGress: Discrete Denoising diffusion for graph generation},
-author={Clement Vignac and Igor Krawczuk and Antoine Siraudin and Bohan Wang and Volkan Cevher and Pascal Frossard},
-booktitle={The Eleventh International Conference on Learning Representations },
-year={2023},
-url={https://openreview.net/forum?id=UaAD-Nu86WX}
-}
+├── data/
+│   └── odor/
+│       ├── Multi-Labelled_Smiles_Odors_dataset.csv   # Raw dataset (4,151 molecules, 138 descriptors)
+│       └── dataset_with_metacategories.csv           # Processed dataset with 12 meta-categories
+├── src/
+│   └── datasets/
+│       └── odor_dataset.py                           # OdorDataset, OdorInfos, OdorDataModule
+├── outputs/                                          # Training checkpoints and logs
+├── results/                                          # Generated molecules (CSV + metrics JSON)
+├── graphs/                                           # All figures (violin plots, scatter, heatmaps...)
+├── analyze_odor_classes.py                           # Dataset analysis and meta-category aggregation
+├── generate_odor.py                                  # Conditional molecule generation
+├── analyze_generated.py                              # Comparative analysis (generated vs real)
+└── README.md
 ```
+
+---
+
+## Dataset
+
+**Source:** publicly available multi-labeled SMILES database  
+**Size:** 4,151 molecules annotated with up to 138 raw olfactory descriptors  
+**Split:** 80/10/10 (train/val/test), seed=42 → 3,321 / 415 / 415 molecules
+
+### Meta-Category Aggregation
+
+The 138 raw descriptors are grouped into **12 meta-categories** using:
+1. Frequency analysis (top-30 descriptors cover ~80% of annotations)
+2. Normalized co-occurrence matrix: $C_{ij} = |D_i \cap D_j| / \min(|D_i|, |D_j|)$
+3. Fragrance Wheel classification
+
+| Category | N | Category | N |
+|---|---|---|---|
+| fruity | 2282 | floral | 1304 |
+| green | 2254 | woody | 1057 |
+| sweet | 1930 | animal\_musk | 772 |
+| chemical | 1552 | citrus | 514 |
+| powdery\_amber | 1335 | earthy | 1006 |
+| gourmand | 1218 | spicy | 1076 |
+
+Chemical distinctiveness validated by **Mann-Whitney U test** (p < 0.001 on at least one physico-chemical property per category).
+
+---
+
+## Model
+
+**Base model:** DiGress Graph Transformer (Vignac et al., 2022)  
+**Parameters:** 4.8M  
+**Atoms:** C, N, O, F (hydrogen-free graphs, max 64 nodes)
+
+| Parameter | Value |
+|---|---|
+| Input dims (X / E / y) | 12 / 5 / 25 |
+| Output dims (X / E) | 4 / 5 |
+| Hidden dims (dx / de / dy) | 128 / 32 / 128 |
+| Attention heads | 8 |
+| FFN dims (nodes / edges) | 512 / 128 |
+| Optimizer | AdamW, lr=2×10⁻⁴, wd=10⁻¹² |
+| Epochs | 50 |
+| Batch size | 64 |
+| Hardware | NVIDIA RTX 5060 (8 GB VRAM) |
+| Training time | ~2h30 |
+| Convergence | Epoch 23 (node CE: 0.426→0.297) |
+
+### Conditioning Mechanism
+
+At inference time, the graph-level conditioning vector **y** (dim=25: 12 category flags + 13 global features) is overridden at every denoising step with a one-hot encoding of the target category:
+
+$$\hat{G}^{t-1} = \phi_\theta(G^t, \mathbf{y} = \mathbf{c}^{(k)})$$
+
+**No architectural change required** — this simply replaces the conditioning signal already used internally by DiGress.
+
+---
+
+## Evaluation
+
+### Generation Metrics (MOSES benchmark)
+
+$$\text{Validity} = \frac{|\{m \mid \texttt{sanitize}(m) = \text{OK}\}|}{1280}$$
+
+$$\text{Uniqueness} = \frac{|\{\text{distinct SMILES} \mid m \in \mathcal{G}_\text{valid}\}|}{|\mathcal{G}_\text{valid}|}$$
+
+$$\text{Novelty} = \frac{|\{m \in \mathcal{G}_\text{valid} \mid \text{SMILES}(m) \notin \mathcal{D}_\text{train}\}|}{|\mathcal{G}_\text{valid}|}$$
+
+All three metrics are computed over all **1,280 generation attempts** (invalid molecules included in the denominator for validity; valid molecules as denominator for uniqueness and novelty).
+
+### Tanimoto Similarity
+
+Morgan fingerprints (radius=2, 2048 bits) via RDKit. For each generated molecule, nearest-neighbor Tanimoto against the target class:
+
+$$T(m, \mathcal{D}_k) = \max_{r \in \mathcal{D}_k} \frac{|\text{FP}(m) \cap \text{FP}(r)|}{|\text{FP}(m) \cup \text{FP}(r)|}$$
+
+Computed on valid **and** filtered molecules (50 ≤ MW ≤ 600 Da, -2 ≤ LogP ≤ 6).
+
+### Functional Group Analysis
+
+28 SMARTS patterns detected via `mol.HasSubstructMatch(pattern)`.  
+Enrichment ratio: $E_{g,k} = f_{g,k} / f_{g,\text{overall}}$ — values above 1 indicate over-representation in the category.
+
+---
+
+## Installation
+```bash
+# Clone DiGress
+git clone https://github.com/cvignac/DiGress.git
+cd DiGress
+
+# Install dependencies
+pip install torch torch-geometric rdkit pytorch-lightning
+pip install pandas numpy matplotlib seaborn scipy
+
+# Add project files
+cp path/to/odor_dataset.py src/datasets/
+cp path/to/analyze_odor_classes.py .
+cp path/to/generate_odor.py .
+cp path/to/analyze_generated.py .
+```
+
+---
+
+## Usage
+
+### 1. Build the dataset
+```bash
+python analyze_odor_classes.py
+# Output: data/odor/dataset_with_metacategories.csv
+#         graphs/odor_class_analysis.png
+```
+
+### 2. Train the model
+```bash
+python main.py --dataset odor --guidance_target None
+# Checkpoint saved to outputs/<date>/<time>-odor/
+```
+
+### 3. Generate molecules
+```bash
+# Edit TARGET_META_CATEGORY in generate_odor.py (e.g. 'floral')
+python generate_odor.py
+# Output: results/generated_floral_with_props.csv
+#         results/generated_floral_metrics.json
+```
+
+### 4. Analyze results
+```bash
+# Edit CATEGORY in analyze_generated.py
+python analyze_generated.py
+# Output: graphs/compare_properties_floral.png
+#         graphs/chemical_space_floral.png
+#         graphs/compare_substructures_floral.png
+```
+
+---
+
+## Limitations
+
+1. **Minimal conditioning** — the one-hot override does not modify the diffusion process itself. A more principled approach would incorporate the class signal into the transition matrices (Graph DiT / classifier-free guidance).
+
+2. **MW bias** — the model pulls generated MW toward the global dataset average regardless of the target category. Categories lighter than average (animal\_musk) are overestimated (+22 Da); heavier ones (woody, floral) are underestimated (-35 Da, -24 Da). Explicit MW conditioning via AdaLN would correct this.
+
+3. **Chemical validity ≠ olfactory quality** — whether generated molecules actually smell like musk or floral requires perceptual evaluation or a dedicated odor prediction model.
+
+---
+
+## References
+
+- Vignac et al. (2022). *DiGress: Discrete Denoising Diffusion for Graph Generation.* arXiv:2209.14734
+- Liu et al. (2024). *Graph Diffusion Transformers for Multi-Conditional Molecular Generation.* NeurIPS 37
+- Polykovskiy et al. (2020). *Molecular Sets (MOSES): A Benchmarking Platform.* Frontiers in Pharmacology
+- Bilodeau et al. (2022). *Generative Models for Molecular Discovery.* WIREs Computational Molecular Science
+- Landrum, G. RDKit: Open-source cheminformatics. https://www.rdkit.org
+
+---
+
+## License
+
+This project is part of an M2 research project at CY Cergy Paris Université / ETIS Laboratory.  
+Base model: DiGress (MIT License).
