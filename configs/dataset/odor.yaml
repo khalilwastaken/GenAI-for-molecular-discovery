@@ -1,0 +1,5 @@
+name: odor
+datadir: data/odor
+remove_h: true
+random_subset: null
+pin_memory: false

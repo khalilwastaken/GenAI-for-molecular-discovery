@@ -6,10 +6,11 @@ general:
     test_only: null
     evaluate_all_checkpoints: False
 train:
-    n_epochs: 1000
+    n_epochs: 5
     batch_size: 1024
     save_model: True
 model:
+    extra_features: none
     n_layers: 9
     lambda_train: [5, 0]
 dataset:

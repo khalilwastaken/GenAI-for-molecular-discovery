@@ -4,7 +4,8 @@ from src import utils
 
 class DummyExtraFeatures:
     def __init__(self):
-        """ This class does not compute anything, just returns empty tensors."""
+        """This class does not compute anything, just returns empty tensors."""
+        pass
 
     def __call__(self, noisy_data):
         X = noisy_data['X_t']
@@ -26,7 +27,7 @@ class ExtraFeatures:
 
     def __call__(self, noisy_data):
         n = noisy_data['node_mask'].sum(dim=1).unsqueeze(1) / self.max_n_nodes
-        x_cycles, y_cycles = self.ncycles(noisy_data)       # (bs, n_cycles)
+        x_cycles, y_cycles = self.ncycles(noisy_data)  # (bs, n_cycles)
 
         if self.features_type == 'cycles':
             E = noisy_data['E_t']
@@ -37,19 +38,24 @@ class ExtraFeatures:
             eigenfeatures = self.eigenfeatures(noisy_data)
             E = noisy_data['E_t']
             extra_edge_attr = torch.zeros((*E.shape[:-1], 0)).type_as(E)
-            n_components, batched_eigenvalues = eigenfeatures   # (bs, 1), (bs, 10)
-            return utils.PlaceHolder(X=x_cycles, E=extra_edge_attr, y=torch.hstack((n, y_cycles, n_components,
-                                                                                    batched_eigenvalues)))
+            n_components, batched_eigenvalues = eigenfeatures  # (bs, 1), (bs, 10)
+            return utils.PlaceHolder(
+                X=x_cycles,
+                E=extra_edge_attr,
+                y=torch.hstack((n, y_cycles, n_components, batched_eigenvalues))
+            )
+
         elif self.features_type == 'all':
             eigenfeatures = self.eigenfeatures(noisy_data)
             E = noisy_data['E_t']
             extra_edge_attr = torch.zeros((*E.shape[:-1], 0)).type_as(E)
-            n_components, batched_eigenvalues, nonlcc_indicator, k_lowest_eigvec = eigenfeatures   # (bs, 1), (bs, 10),
-                                                                                                # (bs, n, 1), (bs, n, 2)
+            n_components, batched_eigenvalues, nonlcc_indicator, k_lowest_eigvec = eigenfeatures
+            return utils.PlaceHolder(
+                X=torch.cat((x_cycles, nonlcc_indicator, k_lowest_eigvec), dim=-1),
+                E=extra_edge_attr,
+                y=torch.hstack((n, y_cycles, n_components, batched_eigenvalues))
+            )
 
-            return utils.PlaceHolder(X=torch.cat((x_cycles, nonlcc_indicator, k_lowest_eigvec), dim=-1),
-                                     E=extra_edge_attr,
-                                     y=torch.hstack((n, y_cycles, n_components, batched_eigenvalues)))
         else:
             raise ValueError(f"Features type {self.features_type} not implemented")
 
@@ -61,8 +67,9 @@ class NodeCycleFeatures:
     def __call__(self, noisy_data):
         adj_matrix = noisy_data['E_t'][..., 1:].sum(dim=-1).float()
 
-        x_cycles, y_cycles = self.kcycles.k_cycles(adj_matrix=adj_matrix)   # (bs, n_cycles)
+        x_cycles, y_cycles = self.kcycles.k_cycles(adj_matrix=adj_matrix)  # (bs, n_cycles)
         x_cycles = x_cycles.type_as(adj_matrix) * noisy_data['node_mask'].unsqueeze(-1)
+
         # Avoid large values when the graph is dense
         x_cycles = x_cycles / 10
         y_cycles = y_cycles / 10
@@ -71,42 +78,62 @@ class NodeCycleFeatures:
         return x_cycles, y_cycles
 
 
+def _robust_eigh(L: torch.Tensor, eps: float = 1e-6):
+    """
+    Robust eigendecomposition for symmetric matrices.
+    - Adds small jitter eps*I to reduce repeated eigenvalues issues.
+    - Tries on current device, then falls back to CPU double.
+    """
+    try:
+        I = torch.eye(L.size(-1), device=L.device, dtype=L.dtype).unsqueeze(0)
+        eigvals, eigvecs = torch.linalg.eigh(L + eps * I)
+        return eigvals, eigvecs
+    except Exception:
+        Lcpu = L.detach().cpu().double()
+        Icpu = torch.eye(Lcpu.size(-1), dtype=Lcpu.dtype).unsqueeze(0)
+        eigvals_cpu, eigvecs_cpu = torch.linalg.eigh(Lcpu + eps * Icpu)
+        eigvals = eigvals_cpu.to(L.device, dtype=L.dtype)
+        eigvecs = eigvecs_cpu.to(L.device, dtype=L.dtype)
+        return eigvals, eigvecs
+
+
 class EigenFeatures:
     """
-    Code taken from : https://github.com/Saro00/DGN/blob/master/models/pytorch/eigen_agg.py
+    Code adapted from : https://github.com/Saro00/DGN/blob/master/models/pytorch/eigen_agg.py
     """
     def __init__(self, mode):
-        """ mode: 'eigenvalues' or 'all' """
+        """mode: 'eigenvalues' or 'all'"""
         self.mode = mode
 
     def __call__(self, noisy_data):
         E_t = noisy_data['E_t']
-        mask = noisy_data['node_mask']
+        mask = noisy_data['node_mask'].bool()
+
         A = E_t[..., 1:].sum(dim=-1).float() * mask.unsqueeze(1) * mask.unsqueeze(2)
         L = compute_laplacian(A, normalize=False)
+
         mask_diag = 2 * L.shape[-1] * torch.eye(A.shape[-1]).type_as(L).unsqueeze(0)
         mask_diag = mask_diag * (~mask.unsqueeze(1)) * (~mask.unsqueeze(2))
         L = L * mask.unsqueeze(1) * mask.unsqueeze(2) + mask_diag
 
-        if self.mode == 'eigenvalues':
-            eigvals = torch.linalg.eigvalsh(L)        # bs, n
-            eigvals = eigvals.type_as(A) / torch.sum(mask, dim=1, keepdim=True)
+        eigvals, eigvectors = _robust_eigh(L, eps=1e-6)  # <-- robuste pour les 2 modes
+        eigvals = eigvals.type_as(A) / torch.sum(mask, dim=1, keepdim=True)
 
+        if self.mode == 'eigenvalues':
             n_connected_comp, batch_eigenvalues = get_eigenvalues_features(eigenvalues=eigvals)
             return n_connected_comp.type_as(A), batch_eigenvalues.type_as(A)
 
         elif self.mode == 'all':
-            eigvals, eigvectors = torch.linalg.eigh(L)
-            eigvals = eigvals.type_as(A) / torch.sum(mask, dim=1, keepdim=True)
             eigvectors = eigvectors * mask.unsqueeze(2) * mask.unsqueeze(1)
-            # Retrieve eigenvalues features
-            n_connected_comp, batch_eigenvalues = get_eigenvalues_features(eigenvalues=eigvals)
 
-            # Retrieve eigenvectors features
-            nonlcc_indicator, k_lowest_eigenvector = get_eigenvectors_features(vectors=eigvectors,
-                                                                               node_mask=noisy_data['node_mask'],
-                                                                               n_connected=n_connected_comp)
+            n_connected_comp, batch_eigenvalues = get_eigenvalues_features(eigenvalues=eigvals)
+            nonlcc_indicator, k_lowest_eigenvector = get_eigenvectors_features(
+                vectors=eigvectors,
+                node_mask=mask,
+                n_connected=n_connected_comp
+            )
             return n_connected_comp, batch_eigenvalues, nonlcc_indicator, k_lowest_eigenvector
+
         else:
             raise NotImplementedError(f"Mode {self.mode} is not implemented")
 
@@ -114,32 +141,30 @@ class EigenFeatures:
 def compute_laplacian(adjacency, normalize: bool):
     """
     adjacency : batched adjacency matrix (bs, n, n)
-    normalize: can be None, 'sym' or 'rw' for the combinatorial, symmetric normalized or random walk Laplacians
-    Return:
-        L (n x n ndarray): combinatorial or symmetric normalized Laplacian.
+    normalize: if False -> combinatorial Laplacian, if True -> normalized
     """
-    diag = torch.sum(adjacency, dim=-1)     # (bs, n)
+    diag = torch.sum(adjacency, dim=-1)  # (bs, n)
     n = diag.shape[-1]
-    D = torch.diag_embed(diag)      # Degree matrix      # (bs, n, n)
-    combinatorial = D - adjacency                        # (bs, n, n)
+    D = torch.diag_embed(diag)           # (bs, n, n)
+    combinatorial = D - adjacency        # (bs, n, n)
 
     if not normalize:
         return (combinatorial + combinatorial.transpose(1, 2)) / 2
 
     diag0 = diag.clone()
+    diag = diag.clone()
     diag[diag == 0] = 1e-12
 
-    diag_norm = 1 / torch.sqrt(diag)            # (bs, n)
-    D_norm = torch.diag_embed(diag_norm)        # (bs, n, n)
-    L = torch.eye(n).unsqueeze(0) - D_norm @ adjacency @ D_norm
+    diag_norm = 1 / torch.sqrt(diag)     # (bs, n)
+    D_norm = torch.diag_embed(diag_norm) # (bs, n, n)
+    L = torch.eye(n, device=adjacency.device, dtype=adjacency.dtype).unsqueeze(0) - D_norm @ adjacency @ D_norm
     L[diag0 == 0] = 0
     return (L + L.transpose(1, 2)) / 2
 
 
 def get_eigenvalues_features(eigenvalues, k=5):
     """
-    values : eigenvalues -- (bs, n)
-    node_mask: (bs, n)
+    eigenvalues: (bs, n)
     k: num of non zero eigenvalues to keep
     """
     ev = eigenvalues
@@ -147,10 +172,11 @@ def get_eigenvalues_features(eigenvalues, k=5):
     n_connected_components = (ev < 1e-5).sum(dim=-1)
     assert (n_connected_components > 0).all(), (n_connected_components, ev)
 
-    to_extend = max(n_connected_components) + k - n
+    to_extend = int(max(n_connected_components).item()) + k - n
     if to_extend > 0:
         eigenvalues = torch.hstack((eigenvalues, 2 * torch.ones(bs, to_extend).type_as(eigenvalues)))
-    indices = torch.arange(k).type_as(eigenvalues).long().unsqueeze(0) + n_connected_components.unsqueeze(1)
+
+    indices = torch.arange(k, device=eigenvalues.device).long().unsqueeze(0) + n_connected_components.unsqueeze(1)
     first_k_ev = torch.gather(eigenvalues, dim=1, index=indices)
     return n_connected_components.unsqueeze(-1), first_k_ev
 
@@ -158,56 +184,48 @@ def get_eigenvalues_features(eigenvalues, k=5):
 def get_eigenvectors_features(vectors, node_mask, n_connected, k=2):
     """
     vectors (bs, n, n) : eigenvectors of Laplacian IN COLUMNS
-    returns:
-        not_lcc_indicator : indicator vectors of largest connected component (lcc) for each graph  -- (bs, n, 1)
-        k_lowest_eigvec : k first eigenvectors for the largest connected component   -- (bs, n, k)
+    node_mask (bs, n) : bool
+    n_connected (bs, 1) : number of connected components
     """
     bs, n = vectors.size(0), vectors.size(1)
 
-    # Create an indicator for the nodes outside the largest connected components
-    first_ev = torch.round(vectors[:, :, 0], decimals=3) * node_mask                        # bs, n
+    # round to 3 decimals without torch.round(decimals=...) for compatibility
+    first_ev = vectors[:, :, 0] * node_mask
+    first_ev = torch.round(first_ev * 1000) / 1000
+
     # Add random value to the mask to prevent 0 from becoming the mode
-    random = torch.randn(bs, n, device=node_mask.device) * (~node_mask)                                   # bs, n
+    random = torch.randn(bs, n, device=node_mask.device) * (~node_mask)
     first_ev = first_ev + random
-    most_common = torch.mode(first_ev, dim=1).values                                    # values: bs -- indices: bs
-    mask = ~ (first_ev == most_common.unsqueeze(1))
+
+    most_common = torch.mode(first_ev, dim=1).values
+    mask = ~(first_ev == most_common.unsqueeze(1))
     not_lcc_indicator = (mask * node_mask).unsqueeze(-1).float()
 
     # Get the eigenvectors corresponding to the first nonzero eigenvalues
-    to_extend = max(n_connected) + k - n
+    n_connected = n_connected.squeeze(-1).long()
+    to_extend = int(max(n_connected).item()) + k - n
     if to_extend > 0:
-        vectors = torch.cat((vectors, torch.zeros(bs, n, to_extend).type_as(vectors)), dim=2)   # bs, n , n + to_extend
-    indices = torch.arange(k).type_as(vectors).long().unsqueeze(0).unsqueeze(0) + n_connected.unsqueeze(2)    # bs, 1, k
-    indices = indices.expand(-1, n, -1)                                               # bs, n, k
-    first_k_ev = torch.gather(vectors, dim=2, index=indices)       # bs, n, k
+        vectors = torch.cat((vectors, torch.zeros(bs, n, to_extend).type_as(vectors)), dim=2)
+
+    indices = torch.arange(k, device=vectors.device).long().unsqueeze(0).unsqueeze(0) + n_connected.unsqueeze(1).unsqueeze(2)
+    indices = indices.expand(-1, n, -1)
+    first_k_ev = torch.gather(vectors, dim=2, index=indices)
     first_k_ev = first_k_ev * node_mask.unsqueeze(2)
 
     return not_lcc_indicator, first_k_ev
 
+
 def batch_trace(X):
-    """
-    Expect a matrix of shape B N N, returns the trace in shape B
-    :param X:
-    :return:
-    """
     diag = torch.diagonal(X, dim1=-2, dim2=-1)
-    trace = diag.sum(dim=-1)
-    return trace
+    return diag.sum(dim=-1)
 
 
 def batch_diagonal(X):
-    """
-    Extracts the diagonal from the last two dims of a tensor
-    :param X:
-    :return:
-    """
     return torch.diagonal(X, dim1=-2, dim2=-1)
 
 
 class KNodeCycles:
-    """ Builds cycle counts for each node in a graph.
-    """
-
+    """Builds cycle counts for each node in a graph."""
     def __init__(self):
         super().__init__()
 
@@ -221,7 +239,6 @@ class KNodeCycles:
         self.k6_matrix = self.k5_matrix @ self.adj_matrix.float()
 
     def k3_cycle(self):
-        """ tr(A ** 3). """
         c3 = batch_diagonal(self.k3_matrix)
         return (c3 / 2).unsqueeze(-1).float(), (torch.sum(c3, dim=-1) / 6).unsqueeze(-1).float()
 

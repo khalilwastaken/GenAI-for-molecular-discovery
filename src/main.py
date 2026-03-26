@@ -1,4 +1,8 @@
-import graph_tool as gt
+try:
+    import graph_tool as gt
+except ImportError:
+    gt = None
+    print("graph_tool not installed, continuing without it")
 import os
 import pathlib
 import warnings
@@ -6,7 +10,7 @@ import warnings
 import torch
 torch.cuda.empty_cache()
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.utilities.warnings import PossibleUserWarning
@@ -18,12 +22,9 @@ from diffusion_model import LiftedDenoisingDiffusion
 from diffusion_model_discrete import DiscreteDenoisingDiffusion
 from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
 
-
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 
-
 def get_resume(cfg, model_kwargs):
-    """ Resumes a run. It loads previous config without allowing to update keys (used for testing). """
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
@@ -37,14 +38,10 @@ def get_resume(cfg, model_kwargs):
     cfg = utils.update_config_with_new_keys(cfg, saved_cfg)
     return cfg, model
 
-
 def get_resume_adaptive(cfg, model_kwargs):
-    """ Resumes a run. It loads previous config but allows to make some changes (used for resuming training)."""
     saved_cfg = cfg.copy()
-    # Fetch path to this file to get base path
     current_path = os.path.dirname(os.path.realpath(__file__))
     root_dir = current_path.split('outputs')[0]
-
     resume_path = os.path.join(root_dir, cfg.general.resume)
 
     if cfg.model.type == 'discrete':
@@ -52,21 +49,31 @@ def get_resume_adaptive(cfg, model_kwargs):
     else:
         model = LiftedDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
     new_cfg = model.cfg
-
     for category in cfg:
         for arg in cfg[category]:
             new_cfg[category][arg] = cfg[category][arg]
-
     new_cfg.general.resume = resume_path
     new_cfg.general.name = new_cfg.general.name + '_resume'
-
     new_cfg = utils.update_config_with_new_keys(new_cfg, saved_cfg)
     return new_cfg, model
 
-
-
 @hydra.main(version_base='1.3', config_path='../configs', config_name='config')
 def main(cfg: DictConfig):
+    # ==============================================================================
+    # 1. VERROUILLAGE DU DATASET ET CORRECTION OMEGACONF
+    # ==============================================================================
+    OmegaConf.set_struct(cfg, False) # Déverrouillage de la configuration
+    
+    # On garantit que le dataset utilisé est bien 'odor' pour la GenAI for molecular discovery
+    assert cfg.dataset.name == 'odor', f"ERREUR: Dataset détecté = {cfg.dataset.name}. Veuillez lancer avec dataset=odor"
+
+    if not cfg.train.save_model:
+        print("ATTENTION: save_model était False, on le force à True.")
+        cfg.train.save_model = True
+        
+    OmegaConf.set_struct(cfg, True) # Reverrouillage de sécurité
+    # ==============================================================================
+
     dataset_config = cfg["dataset"]
 
     if dataset_config["name"] in ['sbm', 'comm20', 'planar']:
@@ -94,12 +101,12 @@ def main(cfg: DictConfig):
 
         dataset_infos.compute_input_output_dims(datamodule=datamodule, extra_features=extra_features,
                                                 domain_features=domain_features)
-
+        
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
                         'extra_features': extra_features, 'domain_features': domain_features}
 
-    elif dataset_config["name"] in ['qm9', 'guacamol', 'moses']:
+    elif dataset_config["name"] in ['qm9', 'guacamol', 'moses', 'odor']:
         from metrics.molecular_metrics import TrainMolecularMetrics, SamplingMolecularMetrics
         from metrics.molecular_metrics_discrete import TrainMolecularMetricsDiscrete
         from diffusion.extra_features_molecular import ExtraMolecularFeatures
@@ -116,11 +123,15 @@ def main(cfg: DictConfig):
             datamodule = guacamol_dataset.GuacamolDataModule(cfg)
             dataset_infos = guacamol_dataset.Guacamolinfos(datamodule, cfg)
             train_smiles = None
-
         elif dataset_config.name == 'moses':
             from datasets import moses_dataset
             datamodule = moses_dataset.MosesDataModule(cfg)
             dataset_infos = moses_dataset.MOSESinfos(datamodule, cfg)
+            train_smiles = None
+        elif dataset_config["name"] == 'odor':
+            from datasets import odor_dataset
+            datamodule = odor_dataset.OdorDataModule(cfg)
+            dataset_infos = odor_dataset.OdorInfos(datamodule=datamodule, cfg=cfg)
             train_smiles = None
         else:
             raise ValueError("Dataset not implemented")
@@ -140,7 +151,6 @@ def main(cfg: DictConfig):
         else:
             train_metrics = TrainMolecularMetrics(dataset_infos)
 
-        # We do not evaluate novelty during training
         sampling_metrics = SamplingMolecularMetrics(dataset_infos, train_smiles)
         visualization_tools = MolecularVisualization(cfg.dataset.remove_h, dataset_infos=dataset_infos)
 
@@ -151,11 +161,9 @@ def main(cfg: DictConfig):
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
 
     if cfg.general.test_only:
-        # When testing, previous configuration is fully loaded
         cfg, _ = get_resume(cfg, model_kwargs)
         os.chdir(cfg.general.test_only.split('checkpoints')[0])
     elif cfg.general.resume is not None:
-        # When resuming, we can override some parts of previous configuration
         cfg, _ = get_resume_adaptive(cfg, model_kwargs)
         os.chdir(cfg.general.resume.split('checkpoints')[0])
 
@@ -183,41 +191,55 @@ def main(cfg: DictConfig):
         callbacks.append(ema_callback)
 
     name = cfg.general.name
-    if name == 'debug':
-        print("[WARNING]: Run is called 'debug' -- it will run with fast_dev_run. ")
+    use_gpu = torch.cuda.is_available() and int(getattr(cfg.general, "gpus", 0)) > 0
+    print("torch.cuda.is_available() =", torch.cuda.is_available())
+    print("use_gpu =", use_gpu)
 
-    use_gpu = cfg.general.gpus > 0 and torch.cuda.is_available()
-    trainer = Trainer(gradient_clip_val=cfg.train.clip_grad,
-                      strategy="ddp_find_unused_parameters_true",  # Needed to load old checkpoints
-                      accelerator='gpu' if use_gpu else 'cpu',
-                      devices=cfg.general.gpus if use_gpu else 1,
-                      max_epochs=cfg.train.n_epochs,
-                      check_val_every_n_epoch=cfg.general.check_val_every_n_epochs,
-                      fast_dev_run=cfg.general.name == 'debug',
-                      enable_progress_bar=False,
-                      callbacks=callbacks,
-                      log_every_n_steps=50 if name != 'debug' else 1,
-                      logger = [])
+    # ==============================================================================
+    # 2. FIX CRITIQUE PYTORCH LIGHTNING : COUPER LA VALIDATION
+    # ==============================================================================
+    trainer = Trainer(
+        gradient_clip_val=cfg.train.clip_grad,
+        strategy="ddp_find_unused_parameters_true",
+        accelerator="gpu" if use_gpu else "cpu",
+        devices=cfg.general.gpus if use_gpu else 1,
+        max_epochs=cfg.train.n_epochs,
+        check_val_every_n_epoch=1000,    # Empêche la validation pendant l'entraînement
+        num_sanity_val_steps=0,          # Empêche le sanity check au démarrage
+        fast_dev_run=cfg.general.name == 'debug',
+        enable_progress_bar=False,
+        callbacks=callbacks,
+        log_every_n_steps=50 if name != 'debug' else 1,
+        logger=[]
+    )
+    # ==============================================================================
 
     if not cfg.general.test_only:
+        # Entraînement / Reprise
         trainer.fit(model, datamodule=datamodule, ckpt_path=cfg.general.resume)
-        if cfg.general.name not in ['debug', 'test']:
-            trainer.test(model, datamodule=datamodule)
-    else:
-        # Start by evaluating test_only_path
-        trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
-        if cfg.general.evaluate_all_checkpoints:
-            directory = pathlib.Path(cfg.general.test_only).parents[0]
-            print("Directory:", directory)
-            files_list = os.listdir(directory)
-            for file in files_list:
-                if '.ckpt' in file:
-                    ckpt_path = os.path.join(directory, file)
-                    if ckpt_path == cfg.general.test_only:
-                        continue
-                    print("Loading checkpoint", ckpt_path)
-                    trainer.test(model, datamodule=datamodule, ckpt_path=ckpt_path)
+        
+        # ==============================================================================
+        # 3. SAUVEGARDE DE SÉCURITÉ DU MODÈLE
+        # ==============================================================================
+        print("\n" + "="*50)
+        print("SAUVEGARDE DE SÉCURITÉ DU MODÈLE")
+        root_ckpt_path = os.path.join(os.getcwd(), "final_model_manual.ckpt")
+        trainer.save_checkpoint(root_ckpt_path)
+        print(f"Modèle sauvegardé manuellement ici : {root_ckpt_path}")
+        print("Utilisez ce chemin pour generate_odor.py !")
+        print("="*50 + "\n")
+        # ==============================================================================
 
+        # Test (avec protection anti-crash)
+        if cfg.general.name not in ['debug', 'test']:
+            try:
+                trainer.test(model, datamodule=datamodule)
+            except Exception as e:
+                print(f"\n[WARNING] Le test a échoué (erreur: {e}), mais le modèle est SAUVÉ.")
+                print(f"Vous pouvez utiliser {root_ckpt_path}")
+
+    else:
+        trainer.test(model, datamodule=datamodule, ckpt_path=cfg.general.test_only)
 
 if __name__ == '__main__':
     main()

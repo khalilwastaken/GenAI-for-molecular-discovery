@@ -21,6 +21,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         super().__init__()
 
         input_dims = dataset_infos.input_dims
+        input_dims['y'] = dataset_infos.y_dim  # Override for odor dataset (QM9 was 145)
         output_dims = dataset_infos.output_dims
         nodes_dist = dataset_infos.nodes_dist
 
